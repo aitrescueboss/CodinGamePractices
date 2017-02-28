@@ -422,7 +422,6 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
     }
     
     public Set<Field> surveillances() { return this._surveillances; }
-    public Set<Field> passives() { return this._passives; }
     
     public int rows() { return this._rows; }
     public int cols() { return this._cols; }
@@ -509,57 +508,7 @@ final class Search {
         }
         return sortedList;
     }
-    
 
-    private static final SearchNode ERROR_NODE = 
-        new SearchNode( 
-            Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE, Collections.emptySet() );
-    private static class SearchNode {
-        private final int _row;
-        private final int _col;
-        private int _remainingBombs;
-        private Set<Field> _remainingSurveillances;
-        private SearchNode _ancestor = ERROR_NODE;
-        public SearchNode( int r, int c, int b, Set<Field> rem ) {
-            this._row = r; this._col = c; this._remainingBombs = b;
-            this._remainingSurveillances = rem;
-        }
-        public void setAncestor( SearchNode node ) {
-            this._ancestor = node;
-        }
-        public int row() { return this._row; }
-        public int col() { return this._col; }
-        public SearchNode ancestor() { return this._ancestor; }
-        public Set<Field> remainingSurveillances() { return this._remainingSurveillances; }
-        public int remainingBombs() { return this._remainingBombs; }
-        
-        @Override
-        public boolean equals( Object o ) {
-            if( o == null )
-                return false;
-            if( o == this )
-                return true;
-            if( !(o instanceof SearchNode) )
-                return false;
-            SearchNode other = (SearchNode)o;
-            return this._row == other._row &&
-                   this._col == other._col &&
-                   this._remainingBombs == other._remainingBombs &&
-                   this._ancestor.equals( other._ancestor ) &&
-                   this._remainingSurveillances.equals( other._remainingSurveillances );
-        }
-        
-        @Override
-        public int hashCode() {
-            int result = 17;
-            result = result * 37 + this._row;
-            result = result * 37 + this._col;
-            result = result * 37 + this._remainingBombs;
-            result = result * 37 + this._ancestor.hashCode();
-            result = result * 37 + this._remainingSurveillances.hashCode();
-            return result;
-        }
-    }
     /**
      * @param bomb: 爆弾を置くと仮定するフィールド
      * @return Set<Field>: bombに爆弾を置いた時に爆破される敵ノード
@@ -660,7 +609,8 @@ final class Search {
                 // (row, col)に爆風が届かないかもしれない
                 // --> 爆弾を置くことが出来る場所から(row, col)までの間に
                 //     パッシブノードがあるならば，爆風は届かないので
-                //     そこは除外する
+                //     そこは除外する必要がある
+                //     その判断と処理を上下左右4方向について行なう
                 
                 // 爆弾を置く候補が (row, col)より上側にある && 上側の探索はまだ打切られていない
                 if( candidate.row() < row && !discardsDirs.contains( Direction.Up ) ) {
@@ -797,10 +747,14 @@ final class Search {
     }
 }
 
+/**
+ * WorldModel内で
+ * セルで区切られた1つの領域を表現する
+ */
 final class Field {
-    private final int _row;
-    private final int _col;
-    private FieldType _type;
+    private final int _row;  // セルの行インデックス
+    private final int _col;  // セルの列インデックス
+    private FieldType _type; // セルのタイプ
     
     /**
      * @param type:
@@ -819,11 +773,19 @@ final class Field {
     public int row(){ return this._row; }
     public int col(){ return this._col; }
     
-    
+    /**
+     * このセルのタイプを "見張りノード" から
+     * "もうすぐ爆発する" に変更する
+     */
     public void surveillanceToWillFire() {
         assert this._type == FieldType.Surveillance;
         this._type = FieldType.WillFire;
     }
+
+    /**
+     * このセルのタイプを "もうすぐ爆発する" から
+     * "空のセル" に変更する
+     */
     public void willFireToEmpty() {
         assert this._type == FieldType.WillFire;
         this._type = FieldType.EmptyCell;

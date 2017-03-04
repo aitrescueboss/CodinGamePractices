@@ -15,10 +15,15 @@ class Player {
         int height = in.nextInt(); // height of the firewall grid
         in.nextLine();
         
+        // グリッド管理クラス
         WorldModel model = new WorldModel( height, width );
-        Search search = new Search( model );
+        Search search = new Search();
         for (int i = 0; i < height; i++) {
             String mapRow = in.nextLine(); // one line of the firewall grid
+
+            // グリッド管理クラスの更新
+            // i行目 (i: 0 ~ height-1) のmapRowについて，mapRow.charAt(j)は
+            // グリッドの (j, i)に相当する (j: 0 ~ width-1)
             model.updateRow( i, mapRow );
         }
         model.debugOut();
@@ -33,35 +38,26 @@ class Player {
             int rounds = in.nextInt(); // number of rounds left before the end of the game
             int bombs = in.nextInt(); // number of bombs left
             
-             candidates = search.decidePlacesPutBomb( bombs );
+            if( turn >= 1 )
+                model.debugOut();
+            candidates = search.calculateFieldsToPutBombsSeq( bombs, model );
             
-            // 爆弾を置く候補 (candidates) に爆弾を1つ置く
-            // candidatesはFieldのリストとして構築され，そのFieldに爆弾を置いた時
-            // 破壊できるSurveillanceノードの数の降順でソートされている
-            // 爆弾が置かれた時，返り値は爆弾の置かれた場所の集合(要素数1) FIXME
-            // Bombs#act()内で，爆弾が置かれたことをトリガにして
-            // その爆弾に破壊されるSurveillanceノードがEmptyノードに変更される
-            Field hadBePutted = bombsActor.act( turn, candidates, bombs );
-            if( hadBePutted != Field.UNDEFINED ) {
-                // 爆破後に残ったSurveillanceノードに対して
-                // 再度爆弾を置く候補を探索し直す
-                candidates = search.decidePlacesPutBomb( bombs-1 ); 
-            }
+            Bombs.ActResult actResult = bombsActor.act( turn, candidates, bombs );
+            
             turn++;
         }
     }
 }
 
 /**
- * 爆弾の管理を担うクラス
- * 
- * 
+ * 爆弾の設置，管理
+ * 爆弾の設置と発火をトリガにしたリスナの起動
  */ 
 final class Bombs {
-    private final long _initialTurn;
-    private final List<Bomb> _placedBombs;
-    private final List<PutBombListener> _putBombListeners;
-    private final List<BombOnFireListener> _onFireListeners;
+    private final long _initialTurn; //Bombsクラスのコンストラクタで渡される初期ターン
+    private final List<Bomb> _placedBombs; //爆弾を置いた場所の履歴
+    private final List<PutBombListener> _putBombListeners; //爆弾の設置をトリガに起動するリスナのリスト
+    private final List<BombOnFireListener> _onFireListeners; //爆弾の発火をトリガに起動するリスナのリスト
     
     public Bombs( long initialTurn ) {
         this._initialTurn = initialTurn;
@@ -82,6 +78,7 @@ final class Bombs {
      */ 
     private boolean triggerIfBombsOnFire( long turn ) {
         boolean isFired = false;
+        
         Iterator<Bomb> iterator = this._placedBombs.iterator();
         while( iterator.hasNext() ) {
             Bomb bomb = iterator.next();
@@ -97,39 +94,63 @@ final class Bombs {
         return isFired;
     }
     
+    private boolean hadPutted( Field field ) {
+        for( Bomb bomb : this._placedBombs ) {
+            if( bomb.row() == field.row() && bomb.col() == field.col() )
+                return true;
+        }
+        return false;
+    }
+
     /**
-     * 
+     * 爆弾を置く予定の場所を受け取って，爆弾を置くかWAITする
+     *
      * @param turn: 現在のターン
      * @param toPutOn: 爆弾を置く予定の場所を格納したリスト
-     *                 破壊できるSurveillanceノードが多い順のリストになっていること
      * @param remainderBombs: 残爆弾数
-     * @return Field: toPutOnのうち，爆弾を置いたField
-     *                以下の時はWAITしてField.UNDEFINEDを返す
-     *                  remainderBombs <= 0 (残爆弾数が0未満)
-     *                  toPutOn.isEmpty()   (爆弾置くべきときがない時)
+     * @return ActResult: toPutOnのうち，爆弾を置いたFieldと残りのリスト
+     *                    以下の時はWAITして，Field.UNDEFINEDとtoPutOnを返す
+     *                      remainderBombs <= 0 (残爆弾数が0未満)
+     *                      toPutOn.isEmpty()   (爆弾置くべき所がない時)
+     *                      toPutOn.get(0).type() != FieldType.EmptyCell ||
+     *                        hadPutted( toPutOn.get(0) )
+     *                                          (爆弾を置きたい場所がEmptyCellでない，
+     *                                           またはそこに既に爆弾を置いてあった)
      */ 
-    public Field act( long turn, List<Field> toPutOn, int remainderBombs ) {
+    public ActResult act( long turn, List<Field> toPutOn, int remainderBombs ) {
         assert turn >= this._initialTurn;
+
+        // 爆弾の発火を検知してリスナを起動する
+        triggerIfBombsOnFire( turn );
         
         Set<Field> removed = new HashSet<>();
         if( remainderBombs <= 0 ) {
             System.err.printf("Bombs#act(): remainderBombs <= 0 --> doWait(); \n");
             doWait();
-            return Field.UNDEFINED;
+            return new ActResult( Field.UNDEFINED, toPutOn );
         }
         if( toPutOn.isEmpty() ) {
             System.err.printf("Bombs#act(): toPutOn.isEmpty() --> doWait(); \n");
             doWait();
-            return Field.UNDEFINED;
+            return new ActResult( Field.UNDEFINED, toPutOn );
         }
-        // 爆弾の発火を検知してリスナを起動する
-        triggerIfBombsOnFire( turn );
 
-        //爆弾を置く候補の先頭(候補のうち，最も多くSurveillanceノードを爆破できる所)
-        Field willPut = toPutOn.get( 0 );
-        putOnBomb( turn, willPut.row(), willPut.col() );
+        //爆弾を置く候補の先頭に爆弾を置く
+        //候補の先頭がEmptyCell以外，または既に爆弾が置かれていたらならWAIT
+        List<Field> copied = new ArrayList<>( toPutOn );
+        Field willPut = copied.get( 0 );
+        System.err.printf("Bombs.act(): willPut = %s \n", willPut);
+        if( willPut.type() == FieldType.EmptyCell && !hadPutted( willPut ) ) {
+            willPut = copied.remove( 0 );
+            putBomb( turn, willPut.row(), willPut.col() );
+        } else {
+            willPut = Field.UNDEFINED;
+            doWait();
+        }
         
-        return willPut;
+        List<Field> remainder = copied;
+        ActResult result = new ActResult( willPut, remainder );
+        return result;
     }
     
     /**
@@ -158,7 +179,7 @@ final class Bombs {
         this._onFireListeners.add( l );
     }
     
-    private void putOnBomb( long turn, int row, int col ) {
+    private void putBomb( long turn, int row, int col ) {
         this._placedBombs.add( new Bomb( turn, row, col ) );
         for( PutBombListener l : this._putBombListeners ) {
             l.onBomb( turn, row, col ); //リスナを起動
@@ -169,7 +190,40 @@ final class Bombs {
     private void doWait() {
         System.out.println("WAIT");
     }
+
+    /**
+     * Bombs#act()の返り値で返されるクラス
+     */
+    public static final class ActResult {
+        // act()が呼び出された時に爆弾が設置されたField
+        // Waitした場合はField.UNDEFINED
+        private final Field _puttedField; 
+        // act()に渡された "爆弾を設置したい場所のリスト" のうち
+        // act()内で爆弾を設置したFieldを除いた残り
+        private final List<Field> _remainder;
+
+        public ActResult( Field field, List<Field> remainder ) {
+            this._puttedField = field;
+            this._remainder = remainder;
+        }
+
+        // Getter達
+        public Field puttedField() { return this._puttedField; }
+        public List<Field> remainderFieldsList() { return this._remainder; }
+    }
     
+    /**
+     * 爆弾を示すクラス
+     * Bomb's'クラスの内部でのみ使う
+     * 爆弾を設置した場所とその時の時刻を管理する
+     *
+     * Bombクラスはコレクションの中に格納されることも考えなければならないため，
+     * equals()とhashCode()をオーバライドしている
+     * (どのようにオーバライドしたかは下記参考文献を参照)
+     *
+     * [参考文献]
+     * "Effective Java 第2版" 第3章, Joshua Bloch, 柴田 芳樹, 丸善出版
+     */
     private static final class Bomb {
         private final long _placedTurn;
         private final int _row;
@@ -217,15 +271,11 @@ final class Bombs {
  */
 final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListener {
     private Field[][] _fields;
-    private final int _rows; //グリッドの行個数 (0 ~  width-1)
-    private final int _cols; //グリッドの列個数 (0 ~ height-1)
-    
-    //===== キャッシュのための情報 =====
-    private final Set<Field> _surveillances;
-    private final Set<Field> _passives;
+    private final int _rows; //グリッドの行個数 
+    private final int _cols; //グリッドの列個数 
     
     //===== デバッグのための情報 =====
-    private final char _reprs[][];
+    private final char _reprs[][]; //ワールドモデルの文字表記
     
     /**
      * @param rows: must be equals to height
@@ -238,8 +288,6 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
         this._fields = new Field[rows][cols];
         this._reprs = new char[rows][cols];
         
-        this._surveillances = new HashSet<Field>();
-        this._passives = new HashSet<Field>();
     }
     
     /**
@@ -258,14 +306,6 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
            Field field = new Field( type, row, col );
            this._fields[row][col] = field;
            
-           // 情報のキャッシュ
-           if( type == FieldType.Surveillance ) {
-               this._surveillances.add( field );
-           }
-           if( type == FieldType.Passive ) {
-               this._passives.add( field );
-           }
-           
            // デバッグ情報の蓄積
            this._reprs[row][col] = c;
            
@@ -281,7 +321,6 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
      * 
      * ロジックはSearch#searchBombedSurveillances()
      * とほぼ同等
-     * 
      */ 
     @Override
     public void onBomb( long turn, int row, int col ) {
@@ -298,28 +337,24 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
             Field right = this.right( row, col, i );
             
             if( up.type() == FieldType.Surveillance && !isUpSearchingAbort ) {
-                this._surveillances.remove( up );
                 up.surveillanceToWillFire();
                 this._reprs[up.row()][up.col()] = up.type().repr();
             } else if( up.type() == FieldType.Passive && !isUpSearchingAbort ) {
                 isUpSearchingAbort = true;
             }
             if( down.type() == FieldType.Surveillance && !isDownSearchingAbort ) {
-                this._surveillances.remove( down );
                 down.surveillanceToWillFire();
                 this._reprs[down.row()][down.col()] = down.type().repr();
             } else if( down.type() == FieldType.Passive && !isDownSearchingAbort ) {
                 isDownSearchingAbort = true;
             }
             if( left.type() == FieldType.Surveillance && !isLeftSearchingAbort ) {
-                this._surveillances.remove( left );
                 left.surveillanceToWillFire();
                 this._reprs[left.row()][left.col()] = left.type().repr();
             } else if( left.type() == FieldType.Passive && !isLeftSearchingAbort ) {
                 isLeftSearchingAbort = true;
             }
             if( right.type() == FieldType.Surveillance && !isRightSearchingAbort ) {
-                this._surveillances.remove( right );
                 right.surveillanceToWillFire();
                 this._reprs[right.row()][right.col()] = right.type().repr();
             } else if( right.type() == FieldType.Passive && !isRightSearchingAbort ) {
@@ -329,7 +364,7 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
         
         System.err.printf("WorldModel#onBomb(): onBomb(%d, %d, %d) \n",
             turn, row, col);
-        this.debugOut();
+        // this.debugOut();
     }
     
     /**
@@ -357,28 +392,24 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
             Field right = this.right( row, col, i );
             
             if( up.type() == FieldType.WillFire && !isUpSearchingAbort ) {
-                this._surveillances.remove( up );
                 up.willFireToEmpty();
                 this._reprs[up.row()][up.col()] = up.type().repr();
             } else if( up.type() == FieldType.Passive && !isUpSearchingAbort ) {
                 isUpSearchingAbort = true;
             }
             if( down.type() == FieldType.WillFire && !isDownSearchingAbort ) {
-                this._surveillances.remove( down );
                 down.willFireToEmpty();
                 this._reprs[down.row()][down.col()] = down.type().repr();
             } else if( down.type() == FieldType.Passive && !isDownSearchingAbort ) {
                 isDownSearchingAbort = true;
             }
             if( left.type() == FieldType.WillFire && !isLeftSearchingAbort ) {
-                this._surveillances.remove( left );
                 left.willFireToEmpty();
                 this._reprs[left.row()][left.col()] = left.type().repr();
             } else if( left.type() == FieldType.Passive && !isLeftSearchingAbort ) {
                 isLeftSearchingAbort = true;
             }
             if( right.type() == FieldType.WillFire && !isRightSearchingAbort ) {
-                this._surveillances.remove( right );
                 right.willFireToEmpty();
                 this._reprs[right.row()][right.col()] = right.type().repr();
             } else if( right.type() == FieldType.Passive && !isRightSearchingAbort ) {
@@ -388,7 +419,7 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
         
         System.err.printf("WorldModel#onFire(): onFire(%d, %d, %d) \n",
             turn, row, col);
-        this.debugOut();
+        // this.debugOut();
     }
     
     /**
@@ -401,7 +432,9 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
         }
         return this._fields[row][col];
     }
-    
+    // ================================================
+    // ワールドモデルの各グリッドにアクセスするためのGetter群
+    // ================================================
     public Field up   ( int row, int col ) { return this.here( row-1, col   ); }
     public Field left ( int row, int col ) { return this.here( row  , col-1 ); }
     public Field right( int row, int col ) { return this.here( row  , col+1 ); }
@@ -412,6 +445,9 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
     public Field right( int row, int col, int steps ) { return this.here( row      , col+steps ); }
     public Field down ( int row, int col, int steps ) { return this.here( row+steps, col   ); }
     
+    /**
+     * ワールドモデルの各グリッドのデバッグ用出力
+     */
     public void debugOut() {
         for( int i = 0; i < this._rows; i++ ) {
             for( int j = 0; j < this._cols; j++ ) {
@@ -421,7 +457,13 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
         }
     }
     
-    public Set<Field> surveillances() { return this._surveillances; }
+    public void copyFieldsTo( Field[][] dest ) {
+        for( int i = 0; i < this._rows; i++ ) {
+            for( int j = 0; j < this._cols; j++ ) {
+                dest[i][j] = this._fields[i][j].deepCopy();
+            }
+        }
+    }
     
     public int rows() { return this._rows; }
     public int cols() { return this._cols; }
@@ -433,88 +475,160 @@ final class WorldModel implements Bombs.PutBombListener, Bombs.BombOnFireListene
 }
 
 /**
- * 探索を担うクラス
- * ワールドモデルを元にして，爆弾を置く候補の探索を提供する
+ * 爆弾を設置すべき場所の探索を担う
  * 
- */ 
+ *
+ */
 final class Search {
-    
-    private final WorldModel _model;
-    
-    public Search( WorldModel model ) {
-        this._model = model;
-    }
-    
-    /**
-     * 
-     * @return 爆弾を置くべきと判断したFieldのリスト
-     *         リストは「要素に含まれるFieldに爆弾を置いた時に
-     *         爆破できる敵ノードの数」の降順でソートされている
-     */ 
-    public List<Field> decidePlacesPutBomb( int remainingBombs ) {
-        long start = System.currentTimeMillis();
-        // 見張りノードの集合
-        Set<Field> surveillances = this._model.surveillances();
-        System.err.printf("Search#decidePlacesPutBomb(): num of surveillances = %d \n",
-            surveillances.size());
-        
-        // 爆破できる敵ノードの数でスコア付けされた
-        // 爆弾を置くフィールドの候補(集合)
-        Search.ScoredFields places = new Search.ScoredFields();
-        
-        for( Field surveillance : surveillances ) {
-            // 敵ノードの位置(sr, sc)に対して，(sr, sc)に
-            // 爆風を届けられるフィールドの候補集合を取得する
-            Set<Field> candidates = findCandidatePlacesPutBomb( 
-                surveillance.row(), 
-                surveillance.col()
-            );
-            for( Field candidate : candidates ) {
-                places.incrementScore( candidate );
-            }
-        }
-        // 上のfor文が終わると，変数placesには
-        // 全Surveillanceノードに対してそこを爆破する置き場の全候補が入っている
-        System.err.printf("Search#decidePlacesPutBoms(): candidates size = %d \n", places.size());
-        
-        Set<Field> alreadyBombedSurveillances = new HashSet<>();
-        // 爆破できる敵ノードの数でスコア付けされた，爆弾を置くフィールド
-        // の候補をスコアの降順でソートしたリスト
-        List<Field> sortedList = places.toSortedList();        
-        Iterator<Field> iterator = sortedList.iterator();
-        while( iterator.hasNext() ) {
-            Field bomb = iterator.next();
-            Set<Field> bombedSurveillances = searchBombedSurveillances( bomb );
-            // 場所bombに爆弾を置いて爆破できるSurveillanceノード全てが
-            // 既に破壊予定のものであった場合，場所bombに爆弾を置いても
-            // 新たな敵ノードを破壊できるわけではないので爆弾を置く候補から削除する
-            if( alreadyBombedSurveillances.containsAll( bombedSurveillances ) ) {
-                iterator.remove();
-            } else {
-                bombedSurveillances.removeAll( alreadyBombedSurveillances );
-                places.assignScore( bomb, bombedSurveillances.size() );
-                alreadyBombedSurveillances.addAll( bombedSurveillances );
-            }
-        }
-        sortedList = places.toSortedList();
-        long end = System.currentTimeMillis();
-        System.err.printf( "Search#decidePlacesPutBomb(): process time = %d ms\n", (end - start) );
-        
-        { //-- debug out --
-            for( Field field : sortedList ) {
-                System.err.printf("Search#decidePlacesPutBomb(): debug: %s -> %d \n",
-                    field, places.score( field ) );
-            }
-        }
-        return sortedList;
-    }
 
+    public Search( ) {}
+    
     /**
-     * @param bomb: 爆弾を置くと仮定するフィールド
+     * 爆弾を設置すべき場所の探索
+     * 
+     * @param remainingBombs: 残爆弾数
+     * @param model: ワールドモデル
+     *               内部のField配列をコピーして使う
+     *               (わざわざコピーするのは，探索によって
+     *                ワールドモデル内部のFieldの状態を変えてしまう
+     *                ことを防ぐため)
+     */
+    public List<Field> calculateFieldsToPutBombsSeq( int remainingBombs, WorldModel model ) {
+        Field[][] initialFields = new Field[model.rows()][model.cols()];
+        model.copyFieldsTo( initialFields );
+        return calculateFieldsToPutBombsSeq( remainingBombs, initialFields, new ArrayList<Field>() );
+    }
+    
+    /**
+     * バックトラックによる，爆弾を設置すべき場所のリストの構築
+     * 
+     * @param remainingBombs:
+     * @param fields: 探索する範囲となる，Fieldの2次元配列
+     * @param seq: 爆弾を設置すべき場所のリスト
+     *             本メソッドの再帰呼び出しによって構築されていく
+     */
+    private List<Field> calculateFieldsToPutBombsSeq( int remainingBombs, Field[][] fields, List<Field> seq ) {
+        // 今fieldsに残っているSurveillanceノードを求める
+        Set<Field> surveillances = surveillances( fields );
+        
+        // 残爆弾数が0 && しかしまだSurveillanceノードが残っている --> 探索失敗
+        if( remainingBombs == 0 && surveillances.size() > 0 ) {
+            // System.err.printf("Search#calculateFieldsToPutBombsSeq() remainingBombs == 0 && surveillances.size() > 0 \n");
+            return Collections.emptyList();
+        }
+        // Surveillanceノードが0 == 全てのSurveillanceノードが破壊された
+        // --> この時の引数seqが "全てのSurveillanceノードを破壊できる" 
+        //     爆弾の置き場所のリストなのでそれを返す
+        if( surveillances.size() == 0 ) {
+            // System.err.printf("Search#calculateFieldsToPutBombsSeq() surveillances.size() == 0 \n");
+            return seq;
+        } 
+
+        // fieldsに対して，"そこに爆弾を置くことで破壊できるSurveillanceノードの個数"
+        // で各fieldをスコア付けしたものを計算する
+        ScoredFields scoredFields = calcScoredFields( fields );
+
+        // scoredFields.toSortedList()によって，最も多くSurveillanceノードを破壊
+        // できるFieldから順番に爆弾を置く場所の候補を取得して，各候補について
+        // バックトラック探索する
+        for( Field candidate : scoredFields.toSortedList() ) {
+            // 次の一手
+            Set<Field> bombed = searchBombedSurveillances( 
+                candidate.row(),
+                candidate.col(),
+                fields
+            );
+            // fieldsの更新: candidateに爆弾を置いた時に
+            //              爆破されるSurveillanceノードを
+            //              EmptyCellに変更する
+            setFieldsToAfterBombed( 
+                candidate.row(),
+                candidate.col(),
+                bombed,
+                fields
+            );
+            List<Field> nextSeq = new ArrayList<Field>( seq.size() + 1 );
+            nextSeq.addAll( seq );
+            nextSeq.add( candidate );
+            
+            // 再帰によるバックトラック探索
+            List<Field> recursedSeq = calculateFieldsToPutBombsSeq(
+                remainingBombs - 1,
+                fields,
+                nextSeq
+            );
+
+            // fieldsの更新を戻す: candidateに爆弾を置いた時に爆破される
+            //                   SurveillanceノードはEmptyCellに変更
+            //                   されているので，それをまたSurveillance
+            //                   ノードに戻す
+            setFieldsToBeforeBombed(
+                candidate.row(),
+                candidate.col(),
+                bombed,
+                fields
+            );
+
+            // 空リストが返された (すなわち探索失敗) なら，
+            // いま着目している爆弾を置く場所の候補(candidate)は除外して
+            // 次のループに託す
+            if( recursedSeq.isEmpty() ) {
+                continue;
+            } else {
+                for( Field f : recursedSeq ) {
+                    System.err.printf("Search#calculateFieldsToPutBombsSeq(): result = %s \n", f);
+                }
+                // 空リスト以外が返されたら，全てのSurveillanceノードが
+                // 破壊できる爆弾の置き場所のリストが返されているので
+                // それを呼び出し元に返す
+                return recursedSeq;
+            }
+        }
+        // 全部の候補(candidate)を試しても探索失敗
+        return Collections.emptyList();
+    }
+    
+    private ScoredFields calcScoredFields( Field[][] fields ) {
+        ScoredFields scoredFields = new ScoredFields();
+        Set<Field> surveillances = surveillances( fields );
+        for( Field surveillance : surveillances ) {
+            // fieldsの( surveillance.row(), surveillance.col() )を
+            // 破壊できる爆弾の置き場の集合を計算
+            Set<Field> candidates = findCandidatePlacesPutBomb (
+                surveillance.row(),
+                surveillance.col(),
+                fields
+            );
+            // 爆弾の置き場について，Surveillanceを1つ破壊できるので
+            // スコア付けをインクリメント
+            for( Field candidate : candidates ) {
+                scoredFields.incrementScore( candidate );
+            }
+        }
+        
+        return scoredFields;
+    }
+    
+    private void setFieldsToAfterBombed( int row, int col, Set<Field> bombed, Field[][] fields ) {
+        for( Field surveillance : bombed ) {
+            (fields[surveillance.row()][surveillance.col()]).changeTypeTo( FieldType.EmptyCell );
+        }
+    }
+    
+    private void setFieldsToBeforeBombed( int row, int col, Set<Field> bombed, Field[][] fields ) {
+        for( Field surveillance : bombed ) {
+            (fields[surveillance.row()][surveillance.col()]).changeTypeTo( FieldType.Surveillance );
+        }
+    }
+    
+    /**
+     * @param row: 爆弾を置くと仮定するフィールド(fieldsの行インデックス)
+     * @param col: 爆弾を置くと仮定するフィールド(fieldsの列インデックス)
+     * @param fields: Fieldの集合
      * @return Set<Field>: bombに爆弾を置いた時に爆破される敵ノード
-     *                     の集合
+     *                     の集合(fieldsに含まれているもの)
      */ 
-    private Set<Field> searchBombedSurveillances( Field bomb ) {
+    private Set<Field> searchBombedSurveillances( int row, int col, Field[][] fields ) {
         Set<Field> results = new HashSet<Field>();
         
         // 上方向の探索を打ち切ったかどうかを示すフラグ
@@ -535,10 +649,10 @@ final class Search {
         
         for( int i = 1; i <= 3; i++ ) {
                 
-            Field up    = this._model.up   ( bomb.row(), bomb.col(), i );
-            Field down  = this._model.down ( bomb.row(), bomb.col(), i );
-            Field left  = this._model.left ( bomb.row(), bomb.col(), i );
-            Field right = this._model.right( bomb.row(), bomb.col(), i );
+            Field up    = this.up   ( row, col, i, fields );
+            Field down  = this.down ( row, col, i, fields );
+            Field left  = this.left ( row, col, i, fields );
+            Field right = this.right( row, col, i, fields );
             
             if( up.type() == FieldType.Surveillance && !isUpSearchingAbort ) {
                 results.add( up );
@@ -565,7 +679,15 @@ final class Search {
         return results;
     }
     
-
+    private Set<Field> surveillances( Field[][] fields ) {
+        Set<Field> surveillances = new HashSet<>();
+        for( int i = 0; i < fields.length; i++ ) 
+            for( int j = 0; j < fields[i].length; j++ ) 
+                if( fields[i][j].type() == FieldType.Surveillance )
+                    surveillances.add( fields[i][j] );
+        return surveillances;
+    }
+    
     /**
      * (row, col)に爆風を届けられる爆弾の置き場のリストを返す
      * 
@@ -574,108 +696,97 @@ final class Search {
      * @return Set<Field>: 爆弾の置き場を示すFieldの集合
      * 
      */ 
-    private Set<Field> findCandidatePlacesPutBomb( int row, int col ) {
-        assert row >= 0 && row < this._model.rows() &&
-               col >= 0 && col < this._model.cols() ;
-               
+    private Set<Field> findCandidatePlacesPutBomb( int row, int col, Field[][] fields ) {
         // (row, col)に爆風の届く範囲のフィールドを得る
+        // これが爆弾の置き場の候補となる
         // ((row, col)から上下左右3セル分)
         List<Field> candidates = Arrays.asList(
-            this._model.here( row+3, col   ),
-            this._model.here( row+2, col   ),
-            this._model.here( row+1, col   ),
-            this._model.here( row-1, col   ),
-            this._model.here( row-2, col   ),
-            this._model.here( row-3, col   ),
-            this._model.here( row  , col+3 ),
-            this._model.here( row  , col+2 ),
-            this._model.here( row  , col+1 ),
-            this._model.here( row  , col-1 ),
-            this._model.here( row  , col-2 ),
-            this._model.here( row  , col-3 )
+            this.here( row+3, col  , fields ),
+            this.here( row+2, col  , fields ),
+            this.here( row+1, col  , fields ),
+            this.here( row-1, col  , fields ),
+            this.here( row-2, col  , fields ),
+            this.here( row-3, col  , fields ),
+            this.here( row  , col+3, fields ),
+            this.here( row  , col+2, fields ),
+            this.here( row  , col+1, fields ),
+            this.here( row  , col-1, fields ),
+            this.here( row  , col-2, fields ),
+            this.here( row  , col-3, fields )
         );
         
         Set<Field> result = new HashSet<>();
         
-        // 探索を無視する方向のリスト
-        // 以下for文内で更新され，探索の打切りによる処理効率化に使われる
-        Set<Direction> discardsDirs = new HashSet<>();
-        
         for( Field candidate : candidates ) {
-            Field forCheckPassiveNode = Field.UNDEFINED;
-            // 爆弾を置くことが出来る場所ならば
             if( candidate.type() == FieldType.EmptyCell ) {
-                // 爆弾を置くことができても，パッシブノードにさえぎられて
-                // (row, col)に爆風が届かないかもしれない
-                // --> 爆弾を置くことが出来る場所から(row, col)までの間に
-                //     パッシブノードがあるならば，爆風は届かないので
-                //     そこは除外する必要がある
-                //     その判断と処理を上下左右4方向について行なう
-                
-                // 爆弾を置く候補が (row, col)より上側にある && 上側の探索はまだ打切られていない
-                if( candidate.row() < row && !discardsDirs.contains( Direction.Up ) ) {
-                    // 爆弾を置く候補は(row, col)より上側にある
-                    // --> 候補より下側にパッシブノードがあるか探索する
-                    for( int step = 1; step < (row - candidate.row()); step++ ) {
-                        forCheckPassiveNode = this._model.down( row, col, step );
-                        if( forCheckPassiveNode.type() == FieldType.Passive ) {
-                            // これ以降は，(row, col)より上方向への探索はしなくて良い
-                            discardsDirs.add( Direction.Up );
-                            break;
-                        }
-                    }
-                // 爆弾を置く候補が (row, col)より下側にある && 下側の探索はまだ打切られていない
-                } else if( candidate.row() > row && !discardsDirs.contains( Direction.Down ) ) {
-                    // 爆弾を置く候補は(row, col)より下側にある
-                    // --> 候補より上側にパッシブノードがあるか探索する
-                    for( int step = 1; step < (candidate.row() - row); step++ ) {
-                        forCheckPassiveNode = this._model.up( row, col, step );
-                        if( forCheckPassiveNode.type() == FieldType.Passive ) {
-                            // これ以降は，(row, col)より右方向への探索はしなくて良い
-                            discardsDirs.add( Direction.Down );
-                            break;
-                        }
-                    }
-                // 爆弾を置く候補が (row, col)より左側にある && 左側の探索はまだ打切られていない
-                } else if( candidate.col() < col && !discardsDirs.contains( Direction.Left ) ) {
-                    // 爆弾を置く候補は(row, col)より左側にある
-                    // --> 候補より右側にパッシブノードがあるか探索する
-                    for( int step = 1; step < (col - candidate.col()); step++ ) {
-                        forCheckPassiveNode = this._model.right( row, col, step );
-                        if( forCheckPassiveNode.type() == FieldType.Passive ) {
-                            // これ以降は，(row, col)より左方向への探索はしなくて良い
-                            discardsDirs.add( Direction.Left );
-                            break;
-                        }
-                    }
-                // 爆弾を置く候補が (row, col)より右側にある && 右側の探索はまだ打切られていない
-                } else if( candidate.col() > col && !discardsDirs.contains( Direction.Right ) ) {
-                    // 爆弾を置く候補は(row, col)より右側にある
-                    // --> 候補より左側にパッシブノードがあるか探索する
-                    for( int step = 1; step < (candidate.col() - col); step++ ) {
-                        forCheckPassiveNode = this._model.left( row, col, step );
-                        if( forCheckPassiveNode.type() == FieldType.Passive ) {
-                            // これ以降は，(row, col)より右方向への探索はしなくて良い
-                            discardsDirs.add( Direction.Right );
-                            break;
-                        }
-                    }
-                } else {
+                if( candidate == Field.UNDEFINED )
+                    continue;
+                if( isThereExistFieldTypeWithin(
+                    candidate.row(), candidate.col(), row, col, FieldType.Passive, fields) ) {
+                    continue;
                 }
-                
-                // forCheckPassiveNodeがField.UNDEFINEDのまま
-                // --> 爆弾を置く場所の候補から(row, col)までの間にパッシブノードはない
-                //     ので，候補のリストに追加する
-                if( forCheckPassiveNode == Field.UNDEFINED )
-                    result.add( candidate );
+                result.add( candidate );
             }
         }
         return result;
     }
     
-    private enum Direction {
-        Up, Left, Right, Down
+    private boolean isThereExistFieldTypeWithin( int startRow, 
+        int startCol, int endRow, int endCol, FieldType type, Field[][] fields ) {
+        
+        if( startRow > endRow ) {
+            int temp = endRow;
+            endRow = startRow;
+            startRow = temp;
+        }
+        if( startCol > endCol ) {
+            int temp = endCol;
+            endCol = startCol;
+            startCol = temp;
+        }
+        
+        for( int i = startRow; i <= endRow; i++ ) {
+            for( int j = startCol; j <= endCol; j++ ) {
+                if( fields[i][j].type() == type )
+                    return true;
+            }
+        }
+        return false;
     }
+    
+    
+    private Field here( int row, int col, Field[][] fields ) {
+        if( row >= 0 && row < fields.length && col >= 0 && col < fields[0].length )
+            return fields[row][col];
+        else 
+            return Field.UNDEFINED;
+    }
+    
+    private Field up( int row, int col, int steps, Field[][] fields ) {
+        return here( row-steps, col, fields );
+    }
+    private Field down( int row, int col, int steps, Field[][] fields ) {
+        return here( row+steps, col, fields );
+    }
+    private Field left( int row, int col, int steps, Field[][] fields ) {
+        return here( row, col-steps, fields );
+    }
+    private Field right( int row, int col, int steps, Field[][] fields ) {
+        return here( row, col+steps, fields );
+    }
+    private Field up( int row, int col, Field[][] fields ) {
+        return up( row, col, 1, fields );
+    }
+    private Field down( int row, int col, Field[][] fields ) {
+        return down( row, col, 1, fields );
+    }
+    private Field left( int row, int col, Field[][] fields ) {
+        return left( row, col, 1, fields );
+    }
+    private Field right( int row, int col, Field[][] fields ) {
+        return right( row, col, 1, fields );
+    }
+    
     /**
      * Fieldクラスに対するスコア付けを担うクラス
      * スコア付けと，スコアの降順でソートしたFieldのリストを
@@ -684,10 +795,7 @@ final class Search {
      */ 
     private class ScoredFields {
         // Fieldとスコアのマップ
-        // Map<Field, Integer>の形式だと
-        // 値のボクシング・アンボクシングが多く発生するため
-        // int型で要素数1の配列でスコアを表現する
-        private final Map<Field, int[]> _map;
+        private final Map<Field, Integer> _map;
         
         public ScoredFields() {
             this._map = new HashMap<>();
@@ -695,21 +803,14 @@ final class Search {
         
         public void incrementScore( Field field ) {
             if( !this._map.containsKey( field ) ) {
-                int[] score = new int[1];
-                score[0] = 0; //初期スコアを格納する
-                this._map.put( field, score );
+                this._map.put( field, 0 ); //初期スコアを格納する
             }
-            int[] score = this._map.get( field );
-            score[0] = score[0] + 1; //スコアの加算
+            int score = this._map.get( field );
+            this._map.put( field, score + 1 ); //スコアの加算
         }
         
         public void assignScore( Field field, int assignScore ) {
-            if( !this._map.containsKey( field ) ) {
-                int[] score = new int[1];
-                this._map.put( field, score );
-            }
-            int[] score = this._map.get( field );
-            score[0] = assignScore;
+            this._map.put( field, assignScore );
         }
         
         public List<Field> toSortedList() {
@@ -719,13 +820,12 @@ final class Search {
             Collections.sort( fields, new Comparator<Field>(){
                 @Override
                 public int compare( Field f1, Field f2 ) {
-                    int score1 = ScoredFields.this._map.get( f1 )[0];
-                    int score2 = ScoredFields.this._map.get( f2 )[0];
+                    int score1 = ScoredFields.this._map.get( f1 );
+                    int score2 = ScoredFields.this._map.get( f2 );
                     return score2 - score1; //スコアの降順でソートする
                 }
             });
             
-            System.err.println();
             return fields;
         }
         
@@ -739,10 +839,23 @@ final class Search {
         
         public int score( Field field ) {
             if( this._map.containsKey( field ) ) {
-                return this._map.get( field )[0];
+                return this._map.get( field );
             } else {
                 throw new IllegalArgumentException("ScoredFields#score(): Map does'nt have key: " + field);
             }
+        }
+        
+        @Override
+        public String toString() {
+            StringBuilder builder = new StringBuilder();
+            builder.append( "ScoredFields[ \n");
+            for( Map.Entry<Field, Integer> entry : this._map.entrySet() ) {
+                Field f = entry.getKey();
+                int score = entry.getValue();
+                builder.append( String.format( "%s -> %d, \n", f.toString(), score ) );
+            }
+            builder.append( "]" );
+            return builder.toString();
         }
     }
 }
@@ -772,6 +885,10 @@ final class Field {
     public FieldType type(){ return this._type; }
     public int row(){ return this._row; }
     public int col(){ return this._col; }
+    
+    public void changeTypeTo( FieldType type ) {
+        this._type = type;
+    }
     
     /**
      * このセルのタイプを "見張りノード" から
